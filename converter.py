@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import signal
+import time
 
 import paho.mqtt.client as mqtt
 from prometheus_client import Counter, Gauge, start_http_server
@@ -13,7 +14,7 @@ messages_counter = None
 gauges = dict()
 
 
-def extract_metrics(data):
+def extract_metrics(data, prefix=None):
     if isinstance(data, list):
         # Extract metrics for each list entry
         for entry in data:
@@ -21,12 +22,13 @@ def extract_metrics(data):
     elif isinstance(data, dict):
         # Iterate whole dict
         for key, value in data.items():
+            child = prefix + "_" + key if prefix else key 
             if isinstance(value, list) or isinstance(value, dict):
-                yield from extract_metrics(value)
+                yield from extract_metrics(value, child)
             else:
                 # Create gauge if value is numeric
                 if isinstance(value, int) or isinstance(value, float):
-                    yield key, value
+                    yield child, value
                     
                     
 def parse_metrics(data, labels):
@@ -69,8 +71,9 @@ def on_message(client, userdata, msg):
     # Extract labels
     labels = {}
     if len(topic_elems) % 2 != 0:
-        logging.error("Inner topic parts are not an even number of elements. Fix pls!")
-        exithandler()
+        logging.warning("Inner topic parts are not an even number of elements. Ignoring: " + topic)
+        # exithandler()
+        return
     else:
         it = iter(topic_elems)
         for key in it:
@@ -120,6 +123,7 @@ if __name__ == "__main__":
     parser.add_argument("-c", "--certpath", default="/etc/ssl/certs/", help="Path to the directory that stores CA certificates.")
     parser.add_argument("-mh", "--mqtthost", default="localhost", help="Address of MQTT broker to connect to.")
     parser.add_argument("-mp", "--mqttport", type=int, default=1883, help="Port of MQTT broker to connect to.")
+    parser.add_argument("-ms", "--mqttssl", action="store_true", help="Enable TLS for MQTT.")
     parser.add_argument("-pa", "--prometheusaddress", default="localhost", help="Address to bind to for prometheus metric exposition.")
     parser.add_argument("-pp", "--prometheusport", type=int, default=9337, help="Port to bind to for prometheus metric exposition.")
     parser.add_argument("-u", "--username", help="Username for MQTT broker authentication.")
@@ -128,10 +132,10 @@ if __name__ == "__main__":
 
     # Check args
     if not 0 < args.prometheusport < 65536:
-        logging.error("Invalid port number for prometheus.")
+        logging.error(f"Invalid port number {args.prometheusport} for prometheus.")
         exit(1)
     elif not 0 < args.mqttport < 65536:
-        logging.error("Invalid port number for prometheus.")
+        logging.error(f"Invalid port number {args.mqttport} for mqtt.")
         exit(1)
 
     # Setup signal handling
@@ -151,7 +155,16 @@ if __name__ == "__main__":
     mqtt_client.on_connect = on_connect
     mqtt_client.on_message = on_message
     mqtt_client.on_log = on_log
-    mqtt_client.tls_set_context()
+    if args.mqttssl:
+        mqtt_client.tls_set_context()
     mqtt_client.username_pw_set(args.username, args.password)
-    mqtt_client.connect(args.mqtthost, args.mqttport, 60)
+    
+    while True:
+        try:
+            mqtt_client.connect(args.mqtthost, args.mqttport, 60)
+            break
+        except ConnectionRefusedError:
+            logging.warning(f"Can't connect to {args.mqtthost}:{args.mqttport}")
+            time.sleep(5)
+
     mqtt_client.loop_forever()
